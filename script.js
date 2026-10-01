@@ -52,44 +52,88 @@ let lastFrameTime = performance.now();
 // Physics & Tuning Constants
 const GROUND_Y = 190;
 const GRAVITY = 680;       // px/sec^2 (tuned for floatier, longer jump)
-const JUMP_FORCE = -475;   // px/sec (higher jump clearance)
+const JUMP_FORCE = -375;   // px/sec (clears 48px creature with margin)
 const BULLET_SPEED = 780;  // px/sec
-const BOX_SPEED = 140;     // px/sec (~3.5 seconds across screen)
-const SHOOT_COOLDOWN = 320;// ms (~10 shooting chances per box)
+const BOX_SPEED = 140;     // px/sec
+const SHOOT_COOLDOWN = 320;// ms (~10 shooting chances per creature)
 let lastShootTime = 0;
 
-// The Spiral - Creature 08 Sprite
+// The Spiral - Creature 08 (2.5D Volumetric SVG Sprite)
 const CREATURE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
   <defs>
+    <!-- 2.5D Multi-layer Glow & Depth Filter -->
+    <filter id="glow25d" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#c04bff" flood-opacity="0.75"/>
+      <feDropShadow dx="0" dy="0" stdDeviation="8" flood-color="#ff3fa8" flood-opacity="0.55"/>
+    </filter>
+
+    <!-- 3D Spherical Eye Gradient -->
+    <radialGradient id="eye3d" cx="38%" cy="32%" r="65%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="45%" stop-color="#f0e2ff"/>
+      <stop offset="85%" stop-color="#d0b0f8"/>
+      <stop offset="100%" stop-color="#5a188a"/>
+    </radialGradient>
+
+    <!-- 2.5D Body Volumetric Cylindrical Gradient -->
+    <linearGradient id="body3d" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#2a0845"/>
+      <stop offset="25%" stop-color="#12041f"/>
+      <stop offset="50%" stop-color="#0a0312"/>
+      <stop offset="75%" stop-color="#180529"/>
+      <stop offset="100%" stop-color="#ff3fa8" stop-opacity="0.85"/>
+    </linearGradient>
+
     <clipPath id="c8"><circle cx="100" cy="78" r="36"/></clipPath>
     <path id="sp" fill="none" stroke-width="2" d="M100 100a1.5 1.5 0 0 1 0 3a3 3 0 0 1 0-6a4.5 4.5 0 0 1 0 9a6 6 0 0 1 0-12a7.5 7.5 0 0 1 0 15a9 9 0 0 1 0-18a10.5 10.5 0 0 1 0 21a12 12 0 0 1 0-24a13.5 13.5 0 0 1 0 27a15 15 0 0 1 0-30a16.5 16.5 0 0 1 0 33a18 18 0 0 1 0-36a19.5 19.5 0 0 1 0 39a21 21 0 0 1 0-42a22.5 22.5 0 0 1 0 45a24 24 0 0 1 0-48a25.5 25.5 0 0 1 0 51a27 27 0 0 1 0-54a28.5 28.5 0 0 1 0 57a30 30 0 0 1 0-60a31.5 31.5 0 0 1 0 63a33 33 0 0 1 0-66a34.5 34.5 0 0 1 0 69a36 36 0 0 1 0-72"/>
     <g id="ha" fill="none" stroke="#d9b0ff" stroke-width="2.5" stroke-linecap="round">
       <path d="M0 0L-4-16M0 0L-9-13M0 0L-13-8M0 0L-14-1M0 0L-11 6M0 0L2-17"/>
     </g>
   </defs>
-  <circle cx="100" cy="78" r="42" fill="none" stroke="#c04bff" stroke-width="2" opacity="0.6"/>
-  <g transform="translate(58 130) rotate(-20)"><use href="#ha"/></g>
-  <g transform="translate(142 130) scale(-1 1) rotate(-20)"><use href="#ha"/></g>
-  <path d="M100 30C60 30 46 70 48 110C50 150 34 168 28 190L60 180L80 192L100 182L120 192L140 180L172 190C166 168 150 150 152 110C154 70 140 30 100 30Z" fill="#150824" stroke="#ff3fa8" stroke-width="3.5" stroke-opacity="0.9"/>
-  <circle cx="100" cy="78" r="36" fill="#f0e2ff"/>
-  <g clip-path="url(#c8)">
-    <g transform="translate(0 -22)">
-      <use href="#sp" stroke="#3a0060"/>
-      <use href="#sp" stroke="#ff3fa8" opacity="0.75"/>
+
+  <!-- 2.5D Ground Perspective Shadow -->
+  <ellipse cx="100" cy="192" rx="76" ry="7" fill="#000000" opacity="0.6"/>
+
+  <!-- Depth Aura & Concentric Resonator Rings -->
+  <circle cx="100" cy="78" r="62" fill="none" stroke="#c04bff" stroke-width="6" stroke-dasharray="14 14" opacity="0.18"/>
+  <circle cx="100" cy="78" r="46" fill="none" stroke="#c04bff" stroke-width="2.2" opacity="0.45"/>
+  <circle cx="100" cy="78" r="41" fill="none" stroke="#ff3fa8" stroke-width="1.8" opacity="0.6"/>
+
+  <!-- Main Creature Group with 2.5D Depth Glow -->
+  <g filter="url(#glow25d)">
+    <!-- Back Horn Tendrils in Perspective -->
+    <g transform="translate(58 130) rotate(-20)"><use href="#ha"/></g>
+    <g transform="translate(142 130) scale(-1 1) rotate(-20)"><use href="#ha"/></g>
+
+    <!-- 2.5D Shaded Volumetric Body -->
+    <path d="M100 30C60 30 46 70 48 110C50 150 34 168 28 190L60 180L80 192L100 182L120 192L140 180L172 190C166 168 150 150 152 110C154 70 140 30 100 30Z" 
+          fill="url(#body3d)" stroke="#ff3fa8" stroke-width="3" stroke-opacity="0.9"/>
+
+    <!-- 3D Spherical Eyeball Orb -->
+    <circle cx="100" cy="78" r="36" fill="url(#eye3d)" stroke="#3a0060" stroke-width="1.5"/>
+
+    <!-- Dual Hypnotic Eye Spirals -->
+    <g clip-path="url(#c8)">
+      <g transform="translate(0 -22)">
+        <use href="#sp" stroke="#250040" stroke-width="2.2"/>
+        <use href="#sp" stroke="#ff3fa8" stroke-width="1.8" opacity="0.85"/>
+      </g>
     </g>
-  </g>
-  <g>
-    <path d="M56 124Q100 184 144 124Q100 146 56 124Z" fill="#06020a"/>
-    <path d="M60 128Q100 172 140 128" stroke="#f3eaff" stroke-width="4.5" fill="none" stroke-dasharray="1.6 2.4"/>
-    <path d="M66 132Q100 150 134 132" stroke="#f3eaff" stroke-width="3.4" fill="none" stroke-dasharray="1.6 2.4"/>
-    <path d="M84 148q16 14 32 0q-16 8-32 0z" fill="#ff3fa8"/>
+
+    <!-- 2.5D Recessed Oral Cavity & Teeth -->
+    <g>
+      <path d="M56 124Q100 184 144 124Q100 146 56 124Z" fill="#040108" stroke="#1f0730" stroke-width="1"/>
+      <path d="M60 128Q100 172 140 128" stroke="#f3eaff" stroke-width="4.5" fill="none" stroke-dasharray="1.6 2.4"/>
+      <path d="M66 132Q100 150 134 132" stroke="#f3eaff" stroke-width="3.4" fill="none" stroke-dasharray="1.6 2.4"/>
+      <path d="M84 148q16 14 32 0q-16 8-32 0z" fill="#ff3fa8"/>
+    </g>
   </g>
 </svg>`;
 
 const creatureImg = new Image();
 creatureImg.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(CREATURE_SVG);
 
-// Characters on Shared Track
+// Characters on Shared Track (Player Height = 24)
 const p1 = { x: 55, y: GROUND_Y - 24, vy: 0, w: 24, h: 24, dead: false, score: 0 };
 const p2 = { x: 105, y: GROUND_Y - 24, vy: 0, w: 24, h: 24, dead: false, score: 0 };
 
@@ -97,9 +141,9 @@ let bullets = [];
 let currentBox = null;
 let boxIdCounter = 0;
 let boxSpawnTimer = 0.5;   // Seconds before next spawn
-let particles = [];        // Hit & destruction effects
+let particles = [];
 
-// Check for Invite Link on Load
+// Auto-join via URL param
 window.addEventListener("DOMContentLoaded", () => {
   const params = new URLSearchParams(window.location.search);
   const code = params.get("game");
@@ -404,7 +448,7 @@ function updatePhysics(dt) {
     if (pt.life <= 0) particles.splice(i, 1);
   }
 
-  // 4. Host Spawns Creature (P1 is host, or P2 if P1 is dead)
+  // 4. Host Spawns Creature (2x player height = 48px)
   const isHost = (myRole === "p1") || (p1.dead && myRole === "p2");
   if (!currentBox) {
     boxSpawnTimer -= dt;
@@ -413,9 +457,9 @@ function updatePhysics(dt) {
       const newCreature = {
         id: "box_" + boxIdCounter + "_" + Date.now(),
         x: canvas.width,
-        y: GROUND_Y - 28,
-        w: 28,
-        h: 28,
+        y: GROUND_Y - 48, // 2x player height (48px)
+        w: 48,
+        h: 48,
         hp: 3,
         maxHp: 3
       };
@@ -487,15 +531,13 @@ function applyHit(boxId, shooter) {
   if (!currentBox || currentBox.id !== boxId) return;
 
   currentBox.hp--;
-  // Hit particles (neon pink glow)
-  spawnParticles(currentBox.x + currentBox.w / 2, currentBox.y + currentBox.h / 2, 5, "#ff3fa8");
+  spawnParticles(currentBox.x + currentBox.w / 2, currentBox.y + currentBox.h / 2, 6, "#ff3fa8");
 
   if (currentBox.hp <= 0) {
     if (shooter === "p1") p1.score++;
     if (shooter === "p2") p2.score++;
 
-    // Large explosion effect (neon purple burst)
-    spawnParticles(currentBox.x + currentBox.w / 2, currentBox.y + currentBox.h / 2, 16, "#c04bff");
+    spawnParticles(currentBox.x + currentBox.w / 2, currentBox.y + currentBox.h / 2, 20, "#c04bff");
 
     currentBox = null;
     boxSpawnTimer = 0.8;
@@ -531,7 +573,7 @@ function broadcastDeath(role) {
 function spawnParticles(x, y, count, color) {
   for (let i = 0; i < count; i++) {
     const angle = Math.random() * Math.PI * 2;
-    const speed = 40 + Math.random() * 120;
+    const speed = 40 + Math.random() * 140;
     particles.push({
       x, y,
       vx: Math.cos(angle) * speed,
@@ -560,7 +602,7 @@ function renderCanvas() {
     ctx.fillRect(pt.x, pt.y, 3, 3);
   });
 
-  // Draw Approaching Creature with Health Indicator
+  // Draw 2.5D Creature with Health Indicator
   if (currentBox) {
     if (creatureImg.complete) {
       ctx.drawImage(creatureImg, currentBox.x, currentBox.y, currentBox.w, currentBox.h);
@@ -572,15 +614,15 @@ function renderCanvas() {
     // Mini Health Bar above creature's head
     const hpRatio = Math.max(0, currentBox.hp / currentBox.maxHp);
     ctx.fillStyle = "#222";
-    ctx.fillRect(currentBox.x, currentBox.y - 7, currentBox.w, 4);
+    ctx.fillRect(currentBox.x, currentBox.y - 8, currentBox.w, 4);
     ctx.fillStyle = hpRatio > 0.35 ? "#4caf50" : "#ff3fa8";
-    ctx.fillRect(currentBox.x, currentBox.y - 7, currentBox.w * hpRatio, 4);
+    ctx.fillRect(currentBox.x, currentBox.y - 8, currentBox.w * hpRatio, 4);
 
     // Hit Count Indicator (3/3, 2/3, 1/3)
     ctx.fillStyle = "#fff";
     ctx.font = "bold 10px monospace";
     ctx.textAlign = "center";
-    ctx.fillText(`${currentBox.hp}/${currentBox.maxHp}`, currentBox.x + currentBox.w / 2, currentBox.y - 11);
+    ctx.fillText(`${currentBox.hp}/${currentBox.maxHp}`, currentBox.x + currentBox.w / 2, currentBox.y - 12);
   }
 
   // Draw Bullets
