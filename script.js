@@ -52,7 +52,7 @@ let lastFrameTime = performance.now();
 // Physics & Tuning Constants
 const GROUND_Y = 190;
 const GRAVITY = 600;       // px/sec^2
-const JUMP_FORCE = -770;   // px/sec
+const JUMP_FORCE = -470;   // px/sec
 const BULLET_SPEED = 780;  // px/sec
 const BOX_SPEED = 140;     // px/sec (~3.5 seconds across screen)
 const SHOOT_COOLDOWN = 320;// ms (~10 shooting chances per box)
