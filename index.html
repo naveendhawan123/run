@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>2-Player Runner</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+  <div class="game-container">
+    <!-- Lobby View -->
+    <div id="lobby-view">
+      <h2>2-Player Runner</h2>
+      <button id="btn-create">Create Game</button>
+      <div class="separator">OR</div>
+      <div class="join-box">
+        <input type="text" id="input-code" placeholder="GAME CODE" maxlength="6">
+        <button id="btn-join">Join</button>
+      </div>
+      <p id="lobby-error" class="error"></p>
+    </div>
+
+    <!-- Active Game View -->
+    <div id="game-view" style="display: none;">
+      <div class="header">
+        <span>Room: <strong id="lbl-code"></strong></span>
+        <button id="btn-copy">Copy Invite Link</button>
+        <span id="copy-msg"></span>
+      </div>
+
+      <div class="status-bar">
+        <span id="lbl-role"></span>
+        <span id="lbl-status">Waiting for opponent...</span>
+      </div>
+
+      <!-- 2-Lane Game Screen -->
+      <canvas id="game-canvas" width="600" height="260"></canvas>
+
+      <div class="controls-hint">
+        Tap screen or press <strong>SPACE / UP ARROW</strong> to Jump
+      </div>
+
+      <div id="game-over-box" style="display: none;">
+        <h3 id="lbl-winner"></h3>
+        <p id="lbl-scores"></p>
+        <button id="btn-rematch">Play Again</button>
+        <button id="btn-leave">Leave Room</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
