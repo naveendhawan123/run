@@ -9,7 +9,7 @@
 </head>
 <body>
   <div class="game-container">
-    <!-- Lobby View -->
+    <!-- Lobby Screen -->
     <div id="lobby-view">
       <h2>Co-Op Runner & Gunner</h2>
       <button id="btn-create" class="action-btn">Create Game</button>
@@ -21,7 +21,7 @@
       <p id="lobby-error" class="error"></p>
     </div>
 
-    <!-- Active Game View -->
+    <!-- Active Game Screen -->
     <div id="game-view" style="display: none;">
       <div class="header">
         <span>Room: <strong id="lbl-code"></strong></span>
@@ -37,12 +37,13 @@
       <!-- Single Shared Canvas Track -->
       <canvas id="game-canvas" width="600" height="240"></canvas>
 
-      <!-- On-Screen Controls for Touch / Mobile & Desktop -->
+      <!-- Action Buttons -->
       <div class="controls-bar">
         <button id="ctrl-jump" class="ctrl-btn">JUMP [W / ↑ / Space]</button>
         <button id="ctrl-shoot" class="ctrl-btn shoot-btn">SHOOT [F / X / Enter]</button>
       </div>
 
+      <!-- Game Over Banner -->
       <div id="game-over-box" style="display: none;">
         <h3 id="lbl-winner">Both Players Eliminated!</h3>
         <p id="lbl-scores"></p>
