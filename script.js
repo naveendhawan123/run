@@ -4,20 +4,20 @@
 const SUPABASE_URL = "https://pxubennkaogxynrhkyuk.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_O-CeDULC2SWZb6ullHg95w_nfC2u8uq";
 
-// Safe initialization
+// Safe client initialization
 let supabaseClient = null;
 if (window.supabase && SUPABASE_URL.startsWith("https://")) {
   supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 }
 
 // Player Identity
-let playerId = localStorage.getItem("runner_player_id");
+let playerId = localStorage.getItem("coop_runner_id");
 if (!playerId) {
   playerId = "user_" + Math.random().toString(36).substring(2, 9);
-  localStorage.setItem("runner_player_id", playerId);
+  localStorage.setItem("coop_runner_id", playerId);
 }
 
-// UI Elements
+// DOM Elements
 const lobbyView = document.getElementById("lobby-view");
 const gameView = document.getElementById("game-view");
 const btnCreate = document.getElementById("btn-create");
@@ -36,33 +36,36 @@ const lblScores = document.getElementById("lbl-scores");
 const btnRematch = document.getElementById("btn-rematch");
 const btnLeave = document.getElementById("btn-leave");
 
+const ctrlJump = document.getElementById("ctrl-jump");
+const ctrlShoot = document.getElementById("ctrl-shoot");
+
 const canvas = document.getElementById("game-canvas");
 const ctx = canvas.getContext("2d");
 
-// Room & Networking State
+// Networking State
 let currentRoom = null;
 let realtimeChannel = null;
 let myRole = null; // 'p1' or 'p2'
 let animationId = null;
 
 // Game World Constants
-const GRAVITY = 0.55;
-const JUMP_FORCE = -9.5;
-const SPEED = 4.2;
+const GROUND_Y = 190;
+const GRAVITY = 0.58;
+const JUMP_FORCE = -10.2;
+const BULLET_SPEED = 11;
+const BOX_SPEED = 2.4; // Travel time from 600 to 90 is ~3.5 seconds (~210 frames)
+const SHOOT_COOLDOWN_MS = 280; // Allows ~11 shots per incoming box
+let lastShootTime = 0;
 
-// Runner States
-const p1 = { x: 50, y: 80, vy: 0, ground: 80, w: 22, h: 22, dead: false, score: 0 };
-const p2 = { x: 50, y: 200, vy: 0, ground: 200, w: 22, h: 22, dead: false, score: 0 };
-let obstacles = [];
-let obstacleTimer = 0;
-let nextSpawnInterval = 90;
-let prngSeed = 1;
+// Shared Track Characters
+// P1 stands slightly behind P2 so both are distinct and visible
+const p1 = { x: 50, y: GROUND_Y - 24, vy: 0, w: 24, h: 24, dead: false, score: 0 };
+const p2 = { x: 95, y: GROUND_Y - 24, vy: 0, w: 24, h: 24, dead: false, score: 0 };
 
-// PRNG for synchronized obstacle generation
-function pseudoRandom() {
-  prngSeed = (prngSeed * 9301 + 49297) % 233280;
-  return prngSeed / 233280;
-}
+let bullets = [];
+let currentBox = null;
+let boxIdCounter = 0;
+let boxSpawnDelay = 30; // Frames before first/next box spawns
 
 // Auto-join via URL param
 window.addEventListener("DOMContentLoaded", () => {
@@ -92,28 +95,33 @@ btnCopy.addEventListener("click", () => {
 btnRematch.addEventListener("click", triggerRematch);
 btnLeave.addEventListener("click", leaveRoom);
 
-// Input Handlers (Space, Up Arrow, Canvas Click/Touch)
+// Button and Keyboard Controls
+ctrlJump.addEventListener("pointerdown", (e) => { e.preventDefault(); performJump(); });
+ctrlShoot.addEventListener("pointerdown", (e) => { e.preventDefault(); performShoot(); });
+
 window.addEventListener("keydown", (e) => {
-  if (e.code === "Space" || e.code === "ArrowUp") {
+  if (e.repeat) return;
+  // Jump Keys: Space, Up, W
+  if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") {
     e.preventDefault();
     performJump();
   }
-});
-
-canvas.addEventListener("pointerdown", (e) => {
-  e.preventDefault();
-  performJump();
+  // Shoot Keys: F, X, Enter
+  if (e.code === "KeyF" || e.code === "KeyX" || e.code === "Enter") {
+    e.preventDefault();
+    performShoot();
+  }
 });
 
 // Jump Execution
 function performJump() {
   if (!currentRoom || currentRoom.status !== "playing") return;
-
   const me = myRole === "p1" ? p1 : p2;
-  if (!me.dead && me.y >= me.ground) {
+
+  // Jump only if on the ground and not dead
+  if (!me.dead && me.y >= GROUND_Y - me.h) {
     me.vy = JUMP_FORCE;
 
-    // Broadcast jump instantly to the opponent
     if (realtimeChannel) {
       realtimeChannel.send({
         type: "broadcast",
@@ -121,6 +129,31 @@ function performJump() {
         payload: { role: myRole }
       });
     }
+  }
+}
+
+// Shoot Execution
+function performShoot() {
+  if (!currentRoom || currentRoom.status !== "playing") return;
+  const me = myRole === "p1" ? p1 : p2;
+  if (me.dead) return;
+
+  const now = Date.now();
+  if (now - lastShootTime < SHOOT_COOLDOWN_MS) return;
+  lastShootTime = now;
+
+  // Spawn local bullet from gun tip
+  const gunX = me.x + me.w + 4;
+  const gunY = me.y + me.h / 2;
+  bullets.push({ x: gunX, y: gunY, vx: BULLET_SPEED, owner: myRole });
+
+  // Broadcast shot to opponent
+  if (realtimeChannel) {
+    realtimeChannel.send({
+      type: "broadcast",
+      event: "shoot",
+      payload: { role: myRole, x: gunX, y: gunY }
+    });
   }
 }
 
@@ -195,7 +228,7 @@ async function joinRoom(code) {
   }
 }
 
-// Enter Game Screen
+// Setup Game Screen
 function enterGameView(room) {
   currentRoom = room;
   lobbyView.style.display = "none";
@@ -218,7 +251,7 @@ function enterGameView(room) {
   }
 }
 
-// Supabase Realtime Listener (Postgres updates + Instant Broadcasts)
+// Realtime Network Synchronization
 function subscribeNetwork(code) {
   if (realtimeChannel) {
     supabaseClient.removeChannel(realtimeChannel);
@@ -237,16 +270,25 @@ function subscribeNetwork(code) {
       }
     )
     .on("broadcast", { event: "jump" }, (payload) => {
-      const targetRole = payload.payload.role;
-      const target = targetRole === "p1" ? p1 : p2;
-      if (target.y >= target.ground) {
+      const target = payload.payload.role === "p1" ? p1 : p2;
+      if (target.y >= GROUND_Y - target.h) {
         target.vy = JUMP_FORCE;
       }
     })
+    .on("broadcast", { event: "shoot" }, (payload) => {
+      const { role, x, y } = payload.payload;
+      bullets.push({ x, y, vx: BULLET_SPEED, owner: role });
+    })
+    .on("broadcast", { event: "damage" }, (payload) => {
+      const { boxId } = payload.payload;
+      if (currentBox && currentBox.id === boxId) {
+        applyBoxDamage(currentBox);
+      }
+    })
     .on("broadcast", { event: "player_dead" }, (payload) => {
-      const { role, score } = payload.payload;
-      if (role === "p1") { p1.dead = true; p1.score = score; }
-      if (role === "p2") { p2.dead = true; p2.score = score; }
+      const { role } = payload.payload;
+      if (role === "p1") p1.dead = true;
+      if (role === "p2") p2.dead = true;
       checkMatchOver();
     })
     .on("broadcast", { event: "restart" }, () => {
@@ -257,22 +299,17 @@ function subscribeNetwork(code) {
 
 // Start Game Loop
 function startMatch() {
-  lblStatus.textContent = "Running!";
+  lblStatus.textContent = "Game Active - Defend & Jump!";
   gameOverBox.style.display = "none";
 
-  // Reset Runners
-  p1.y = p1.ground; p1.vy = 0; p1.dead = false; p1.score = 0;
-  p2.y = p2.ground; p2.vy = 0; p2.dead = false; p2.score = 0;
+  // Reset character physics
+  p1.y = GROUND_Y - p1.h; p1.vy = 0; p1.dead = false; p1.score = 0;
+  p2.y = GROUND_Y - p2.h; p2.vy = 0; p2.dead = false; p2.score = 0;
 
-  // Initialize Seed with Room Code for identical obstacles
-  prngSeed = 0;
-  for (let i = 0; i < currentRoom.id.length; i++) {
-    prngSeed += currentRoom.id.charCodeAt(i);
-  }
-
-  obstacles = [];
-  obstacleTimer = 0;
-  nextSpawnInterval = 80;
+  bullets = [];
+  currentBox = null;
+  boxIdCounter = 0;
+  boxSpawnDelay = 30;
 
   if (animationId) cancelAnimationFrame(animationId);
   animationId = requestAnimationFrame(gameLoop);
@@ -280,8 +317,8 @@ function startMatch() {
 
 // Main Frame Loop
 function gameLoop() {
-  updateGame();
-  renderGame();
+  updatePhysics();
+  renderCanvas();
 
   if (!p1.dead || !p2.dead) {
     animationId = requestAnimationFrame(gameLoop);
@@ -291,162 +328,235 @@ function gameLoop() {
   }
 }
 
-// Update Physics & Obstacles
-function updateGame() {
-  // Update Player 1
+// Update Game World
+function updatePhysics() {
+  // Update Player 1 Physics
   if (!p1.dead) {
     p1.vy += GRAVITY;
     p1.y += p1.vy;
-    if (p1.y > p1.ground) { p1.y = p1.ground; p1.vy = 0; }
-    p1.score++;
+    if (p1.y > GROUND_Y - p1.h) {
+      p1.y = GROUND_Y - p1.h;
+      p1.vy = 0;
+    }
   }
 
-  // Update Player 2
+  // Update Player 2 Physics
   if (!p2.dead) {
     p2.vy += GRAVITY;
     p2.y += p2.vy;
-    if (p2.y > p2.ground) { p2.y = p2.ground; p2.vy = 0; }
-    p2.score++;
+    if (p2.y > GROUND_Y - p2.h) {
+      p2.y = GROUND_Y - p2.h;
+      p2.vy = 0;
+    }
   }
 
-  // Spawn Obstacles Deterministically
-  obstacleTimer++;
-  if (obstacleTimer >= nextSpawnInterval) {
-    obstacleTimer = 0;
-    nextSpawnInterval = Math.floor(65 + pseudoRandom() * 60); // 65 - 125 frames gap
-    const obsWidth = Math.floor(16 + pseudoRandom() * 12);
-    const obsHeight = Math.floor(22 + pseudoRandom() * 10);
-
-    obstacles.push({
-      x: canvas.width,
-      w: obsWidth,
-      h: obsHeight
-    });
+  // Spawn Box if none exists
+  if (!currentBox) {
+    boxSpawnDelay--;
+    if (boxSpawnDelay <= 0) {
+      boxIdCounter++;
+      currentBox = {
+        id: boxIdCounter,
+        x: canvas.width,
+        y: GROUND_Y - 32,
+        w: 32,
+        h: 32,
+        hp: 3,
+        maxHp: 3
+      };
+      boxSpawnDelay = 40;
+    }
   }
 
-  // Move Obstacles & Check Collisions
-  for (let i = obstacles.length - 1; i >= 0; i--) {
-    const ob = obstacles[i];
-    ob.x -= SPEED;
+  // Update Bullets
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.x += b.vx;
 
-    // Collision check for Player 1 (Lane 1: ground = 102)
-    if (!p1.dead) {
-      if (checkCollision(p1, ob, 102)) {
-        p1.dead = true;
-        if (myRole === "p1") broadcastDeath(p1.score);
+    // Check collision with the active box
+    if (currentBox && b.x >= currentBox.x && b.x <= currentBox.x + currentBox.w &&
+        b.y >= currentBox.y && b.y <= currentBox.y + currentBox.h) {
+
+      // Remove bullet
+      bullets.splice(i, 1);
+
+      // Only the shooter registers the hit and broadcasts it to prevent duplicate damage
+      if (b.owner === myRole) {
+        applyBoxDamage(currentBox);
+        if (realtimeChannel) {
+          realtimeChannel.send({
+            type: "broadcast",
+            event: "damage",
+            payload: { boxId: currentBox.id }
+          });
+        }
       }
+      continue;
     }
 
-    // Collision check for Player 2 (Lane 2: ground = 222)
-    if (!p2.dead) {
-      if (checkCollision(p2, ob, 222)) {
-        p2.dead = true;
-        if (myRole === "p2") broadcastDeath(p2.score);
-      }
+    // Clean up off-screen bullets
+    if (b.x > canvas.width) {
+      bullets.splice(i, 1);
+    }
+  }
+
+  // Update Box Position & Player Collision
+  if (currentBox) {
+    currentBox.x -= BOX_SPEED;
+
+    // Check collision with Player 2 (front runner at x=95)
+    if (!p2.dead && isBoxCollidingWith(p2, currentBox)) {
+      p2.dead = true;
+      if (myRole === "p2") broadcastDeath("p2");
     }
 
-    // Cleanup offscreen obstacles
-    if (ob.x + ob.w < 0) {
-      obstacles.splice(i, 1);
+    // Check collision with Player 1 (back runner at x=50)
+    if (!p1.dead && isBoxCollidingWith(p1, currentBox)) {
+      p1.dead = true;
+      if (myRole === "p1") broadcastDeath("p1");
+    }
+
+    // Remove box if it safely leaves the screen
+    if (currentBox.x + currentBox.w < 0) {
+      currentBox = null;
+      boxSpawnDelay = 45;
     }
   }
 }
 
-// AABB Collision Detection
-function checkCollision(player, obstacle, laneGroundY) {
-  const pBox = { left: player.x, right: player.x + player.w, top: player.y, bottom: player.y + player.h };
-  const oBox = { left: obstacle.x, right: obstacle.x + obstacle.w, top: laneGroundY - obstacle.h, bottom: laneGroundY };
-
-  return (
-    pBox.right > oBox.left &&
-    pBox.left < oBox.right &&
-    pBox.bottom > oBox.top &&
-    pBox.top < oBox.bottom
-  );
+// Reduce Box HP & Handle Destruction
+function applyBoxDamage(box) {
+  box.hp--;
+  if (box.hp <= 0) {
+    // Both players get +1 score for destroying the box together
+    if (!p1.dead) p1.score++;
+    if (!p2.dead) p2.score++;
+    currentBox = null;
+    boxSpawnDelay = 50; // Delay before next box spawns
+  }
 }
 
-function broadcastDeath(finalScore) {
+// AABB Collision Detection (Passes if feet are above box top)
+function isBoxCollidingWith(player, box) {
+  const playerLeft = player.x;
+  const playerRight = player.x + player.w;
+  const playerBottom = player.y + player.h;
+
+  const boxLeft = box.x;
+  const boxRight = box.x + box.w;
+  const boxTop = box.y;
+
+  const horizontallyOverlap = playerRight > boxLeft && playerLeft < boxRight;
+  const hitGroundLevel = playerBottom > boxTop + 4; // Tolerance for jump clearance
+
+  return horizontallyOverlap && hitGroundLevel;
+}
+
+function broadcastDeath(role) {
   if (realtimeChannel) {
     realtimeChannel.send({
       type: "broadcast",
       event: "player_dead",
-      payload: { role: myRole, score: finalScore }
+      payload: { role }
     });
   }
 }
 
-// Render Canvas
-function renderGame() {
+// Render Shared Track
+function renderCanvas() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // Lane Dividers & Grounds
-  ctx.strokeStyle = "#333";
-  ctx.lineWidth = 1;
+  // Single Shared Ground Track
+  ctx.strokeStyle = "#444";
+  ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(0, 130);
-  ctx.lineTo(canvas.width, 130);
+  ctx.moveTo(0, GROUND_Y);
+  ctx.lineTo(canvas.width, GROUND_Y);
   ctx.stroke();
 
-  // Lane 1 Ground line
-  ctx.strokeStyle = "#555";
-  ctx.beginPath();
-  ctx.moveTo(0, 102);
-  ctx.lineTo(canvas.width, 102);
-  ctx.stroke();
+  // Draw Approaching Box (Red) with Health Bar & Counter
+  if (currentBox) {
+    ctx.fillStyle = "#d32f2f";
+    ctx.fillRect(currentBox.x, currentBox.y, currentBox.w, currentBox.h);
 
-  // Lane 2 Ground line
-  ctx.beginPath();
-  ctx.moveTo(0, 222);
-  ctx.lineTo(canvas.width, 222);
-  ctx.stroke();
+    // Box Outline
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(currentBox.x, currentBox.y, currentBox.w, currentBox.h);
 
-  // Draw Obstacles (Mirrored in both lanes)
-  ctx.fillStyle = "#ff4444";
-  obstacles.forEach((ob) => {
-    // Top lane obstacle
-    ctx.fillRect(ob.x, 102 - ob.h, ob.w, ob.h);
-    // Bottom lane obstacle
-    ctx.fillRect(ob.x, 222 - ob.h, ob.w, ob.h);
+    // Box Hit / HP Label inside the box
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 12px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(`${currentBox.hp}/${currentBox.maxHp}`, currentBox.x + currentBox.w / 2, currentBox.y + 20);
+
+    // Mini Health Bar above box
+    const barWidth = currentBox.w;
+    const hpPercent = currentBox.hp / currentBox.maxHp;
+    ctx.fillStyle = "#333";
+    ctx.fillRect(currentBox.x, currentBox.y - 8, barWidth, 4);
+    ctx.fillStyle = hpPercent > 0.35 ? "#4caf50" : "#ff9800";
+    ctx.fillRect(currentBox.x, currentBox.y - 8, barWidth * hpPercent, 4);
+  }
+
+  // Draw Flying Bullets (Yellow)
+  ctx.fillStyle = "#ffeb3b";
+  bullets.forEach(b => {
+    ctx.fillRect(b.x, b.y - 2, 7, 3);
   });
 
   // Draw Player 1 (Blue)
-  ctx.fillStyle = p1.dead ? "#555" : "#00aaff";
-  ctx.fillRect(p1.x, p1.y, p1.w, p1.h);
-  ctx.fillStyle = "#fff";
-  ctx.font = "10px monospace";
-  ctx.fillText(`P1: ${p1.score}${p1.dead ? " (OUT)" : ""}`, 10, 20);
+  drawPlayer(p1, "#00aaff", "P1");
 
   // Draw Player 2 (Orange)
-  ctx.fillStyle = p2.dead ? "#555" : "#ff8800";
-  ctx.fillRect(p2.x, p2.y, p2.w, p2.h);
+  drawPlayer(p2, "#ff8800", "P2");
+
+  // Score HUD
+  ctx.textAlign = "left";
+  ctx.font = "12px monospace";
   ctx.fillStyle = "#fff";
-  ctx.fillText(`P2: ${p2.score}${p2.dead ? " (OUT)" : ""}`, 10, 150);
+  ctx.fillText(`P1 Boxes Destroyed: ${p1.score}${p1.dead ? " (DEAD)" : ""}`, 10, 20);
+  ctx.fillText(`P2 Boxes Destroyed: ${p2.score}${p2.dead ? " (DEAD)" : ""}`, 10, 38);
+}
+
+// Draw Character with Gun Barrel
+function drawPlayer(player, color, tag) {
+  if (player.dead) {
+    ctx.fillStyle = "#555";
+  } else {
+    ctx.fillStyle = color;
+  }
+
+  // Body
+  ctx.fillRect(player.x, player.y, player.w, player.h);
+
+  // Gun Barrel protruding forward
+  if (!player.dead) {
+    ctx.fillStyle = "#aaa";
+    ctx.fillRect(player.x + player.w, player.y + player.h / 2 - 2, 6, 4);
+  }
+
+  // Tag above character
+  ctx.fillStyle = "#fff";
+  ctx.font = "10px monospace";
+  ctx.textAlign = "center";
+  ctx.fillText(tag, player.x + player.w / 2, player.y - 5);
 }
 
 function checkMatchOver() {
   if (p1.dead && p2.dead) {
-    lblStatus.textContent = "Game Over!";
+    lblStatus.textContent = "Match Over - Both Eliminated!";
     gameOverBox.style.display = "block";
-
-    if (p1.score > p2.score) {
-      lblWinner.textContent = "Player 1 (Blue) Wins!";
-    } else if (p2.score > p1.score) {
-      lblWinner.textContent = "Player 2 (Orange) Wins!";
-    } else {
-      lblWinner.textContent = "It's a Tie!";
-    }
-
-    lblScores.textContent = `P1 Score: ${p1.score} | P2 Score: ${p2.score}`;
+    lblScores.textContent = `Boxes Destroyed: P1: ${p1.score} | P2: ${p2.score}`;
   }
 }
 
 function drawLobbyPlaceholder() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#555";
+  ctx.fillStyle = "#666";
   ctx.font = "14px monospace";
   ctx.textAlign = "center";
   ctx.fillText("Waiting for Player 2 to join...", canvas.width / 2, canvas.height / 2);
-  ctx.textAlign = "left";
 }
 
 // Rematch Handling
