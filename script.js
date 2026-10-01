@@ -4,17 +4,17 @@
 const SUPABASE_URL = "https://pxubennkaogxynrhkyuk.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_O-CeDULC2SWZb6ullHg95w_nfC2u8uq";
 
-// Safe client initialization
+// Safe Client Initialization
 let supabaseClient = null;
-if (window.supabase && SUPABASE_URL.startsWith("https://")) {
+if (window.supabase && SUPABASE_URL && SUPABASE_URL.startsWith("https://")) {
   supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 }
 
-// Player Identity
-let playerId = localStorage.getItem("coop_runner_id");
+// 2. PLAYER IDENTITY (Uses sessionStorage so two tabs on the same machine get distinct IDs)
+let playerId = sessionStorage.getItem("coop_runner_pid");
 if (!playerId) {
-  playerId = "user_" + Math.random().toString(36).substring(2, 9);
-  localStorage.setItem("coop_runner_id", playerId);
+  playerId = "p_" + Math.random().toString(36).substring(2, 9);
+  sessionStorage.setItem("coop_runner_pid", playerId);
 }
 
 // DOM Elements
@@ -42,42 +42,44 @@ const ctrlShoot = document.getElementById("ctrl-shoot");
 const canvas = document.getElementById("game-canvas");
 const ctx = canvas.getContext("2d");
 
-// Networking State
+// Game State
 let currentRoom = null;
 let realtimeChannel = null;
 let myRole = null; // 'p1' or 'p2'
 let animationId = null;
+let lastFrameTime = performance.now();
 
-// Game World Constants
+// Physics & Tuning Constants
 const GROUND_Y = 190;
-const GRAVITY = 0.58;
-const JUMP_FORCE = -10.2;
-const BULLET_SPEED = 11;
-const BOX_SPEED = 2.4; // Travel time from 600 to 90 is ~3.5 seconds (~210 frames)
-const SHOOT_COOLDOWN_MS = 280; // Allows ~11 shots per incoming box
+const GRAVITY = 980;       // px/sec^2
+const JUMP_FORCE = -390;   // px/sec
+const BULLET_SPEED = 780;  // px/sec
+const BOX_SPEED = 140;     // px/sec (~3.5 seconds across screen)
+const SHOOT_COOLDOWN = 320;// ms (~10 shooting chances per box)
 let lastShootTime = 0;
 
-// Shared Track Characters
-// P1 stands slightly behind P2 so both are distinct and visible
-const p1 = { x: 50, y: GROUND_Y - 24, vy: 0, w: 24, h: 24, dead: false, score: 0 };
-const p2 = { x: 95, y: GROUND_Y - 24, vy: 0, w: 24, h: 24, dead: false, score: 0 };
+// Characters on Shared Track
+const p1 = { x: 55, y: GROUND_Y - 24, vy: 0, w: 24, h: 24, dead: false, score: 0 };
+const p2 = { x: 105, y: GROUND_Y - 24, vy: 0, w: 24, h: 24, dead: false, score: 0 };
 
 let bullets = [];
 let currentBox = null;
 let boxIdCounter = 0;
-let boxSpawnDelay = 30; // Frames before first/next box spawns
+let boxSpawnTimer = 0.5;   // Seconds before next box spawns
+let particles = [];        // Destruction and hit effects
 
-// Auto-join via URL param
+// Check for Invite Link on Load
 window.addEventListener("DOMContentLoaded", () => {
   const params = new URLSearchParams(window.location.search);
   const code = params.get("game");
   if (code && supabaseClient) {
-    inputCode.value = code.toUpperCase();
-    joinRoom(code.toUpperCase());
+    const clean = code.trim().toUpperCase();
+    inputCode.value = clean;
+    joinRoom(clean);
   }
 });
 
-// Lobby Listeners
+// Event Listeners
 btnCreate.addEventListener("click", createRoom);
 btnJoin.addEventListener("click", () => {
   const code = inputCode.value.trim().toUpperCase();
@@ -95,18 +97,16 @@ btnCopy.addEventListener("click", () => {
 btnRematch.addEventListener("click", triggerRematch);
 btnLeave.addEventListener("click", leaveRoom);
 
-// Button and Keyboard Controls
+// Controls (Pointer + Keyboard)
 ctrlJump.addEventListener("pointerdown", (e) => { e.preventDefault(); performJump(); });
 ctrlShoot.addEventListener("pointerdown", (e) => { e.preventDefault(); performShoot(); });
 
 window.addEventListener("keydown", (e) => {
   if (e.repeat) return;
-  // Jump Keys: Space, Up, W
   if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") {
     e.preventDefault();
     performJump();
   }
-  // Shoot Keys: F, X, Enter
   if (e.code === "KeyF" || e.code === "KeyX" || e.code === "Enter") {
     e.preventDefault();
     performShoot();
@@ -117,11 +117,11 @@ window.addEventListener("keydown", (e) => {
 function performJump() {
   if (!currentRoom || currentRoom.status !== "playing") return;
   const me = myRole === "p1" ? p1 : p2;
+  if (me.dead) return;
 
-  // Jump only if on the ground and not dead
-  if (!me.dead && me.y >= GROUND_Y - me.h) {
+  // Jump allowed only when grounded
+  if (me.y >= GROUND_Y - me.h - 1) {
     me.vy = JUMP_FORCE;
-
     if (realtimeChannel) {
       realtimeChannel.send({
         type: "broadcast",
@@ -138,28 +138,35 @@ function performShoot() {
   const me = myRole === "p1" ? p1 : p2;
   if (me.dead) return;
 
-  const now = Date.now();
-  if (now - lastShootTime < SHOOT_COOLDOWN_MS) return;
+  const now = performance.now();
+  if (now - lastShootTime < SHOOT_COOLDOWN) return;
   lastShootTime = now;
 
-  // Spawn local bullet from gun tip
-  const gunX = me.x + me.w + 4;
-  const gunY = me.y + me.h / 2;
-  bullets.push({ x: gunX, y: gunY, vx: BULLET_SPEED, owner: myRole });
+  const bulletData = {
+    id: "b_" + myRole + "_" + now + "_" + Math.floor(Math.random() * 1000),
+    x: me.x + me.w + 4,
+    y: me.y + me.h / 2,
+    vx: BULLET_SPEED,
+    owner: myRole
+  };
 
-  // Broadcast shot to opponent
+  bullets.push(bulletData);
+
   if (realtimeChannel) {
     realtimeChannel.send({
       type: "broadcast",
       event: "shoot",
-      payload: { role: myRole, x: gunX, y: gunY }
+      payload: bulletData
     });
   }
 }
 
 // Room Creation
 async function createRoom() {
-  if (!supabaseClient) return;
+  if (!supabaseClient) {
+    lobbyError.textContent = "Supabase client not initialized. Check credentials.";
+    return;
+  }
   lobbyError.textContent = "";
   const code = Math.random().toString(36).substring(2, 8).toUpperCase();
 
@@ -176,7 +183,7 @@ async function createRoom() {
     .single();
 
   if (error) {
-    lobbyError.textContent = "Failed to create room.";
+    lobbyError.textContent = "Failed to create room: " + error.message;
     return;
   }
 
@@ -184,7 +191,7 @@ async function createRoom() {
   enterGameView(data);
 }
 
-// Join Room
+// Room Join
 async function joinRoom(code) {
   if (!supabaseClient) return;
   lobbyError.textContent = "";
@@ -221,14 +228,14 @@ async function joinRoom(code) {
   } else {
     myRole = room.player_1 === playerId ? "p1" : room.player_2 === playerId ? "p2" : null;
     if (!myRole) {
-      lobbyError.textContent = "Room is already full.";
+      lobbyError.textContent = "Room is full.";
       return;
     }
     enterGameView(room);
   }
 }
 
-// Setup Game Screen
+// Switch to Game Screen
 function enterGameView(room) {
   currentRoom = room;
   lobbyView.style.display = "none";
@@ -251,14 +258,14 @@ function enterGameView(room) {
   }
 }
 
-// Realtime Network Synchronization
+// Realtime Network Handler (self: false avoids duplicate broadcast processing)
 function subscribeNetwork(code) {
   if (realtimeChannel) {
     supabaseClient.removeChannel(realtimeChannel);
   }
 
   realtimeChannel = supabaseClient
-    .channel(`runner_${code}`)
+    .channel(`runner_${code}`, { config: { broadcast: { self: false } } })
     .on(
       "postgres_changes",
       { event: "UPDATE", schema: "public", table: "runner_games", filter: `id=eq.${code}` },
@@ -271,19 +278,19 @@ function subscribeNetwork(code) {
     )
     .on("broadcast", { event: "jump" }, (payload) => {
       const target = payload.payload.role === "p1" ? p1 : p2;
-      if (target.y >= GROUND_Y - target.h) {
+      if (!target.dead && target.y >= GROUND_Y - target.h - 1) {
         target.vy = JUMP_FORCE;
       }
     })
     .on("broadcast", { event: "shoot" }, (payload) => {
-      const { role, x, y } = payload.payload;
-      bullets.push({ x, y, vx: BULLET_SPEED, owner: role });
+      bullets.push(payload.payload);
     })
-    .on("broadcast", { event: "damage" }, (payload) => {
-      const { boxId } = payload.payload;
-      if (currentBox && currentBox.id === boxId) {
-        applyBoxDamage(currentBox);
-      }
+    .on("broadcast", { event: "spawn_box" }, (payload) => {
+      currentBox = payload.payload;
+    })
+    .on("broadcast", { event: "box_hit" }, (payload) => {
+      const { boxId, shooter } = payload.payload;
+      applyHit(boxId, shooter);
     })
     .on("broadcast", { event: "player_dead" }, (payload) => {
       const { role } = payload.payload;
@@ -297,28 +304,36 @@ function subscribeNetwork(code) {
     .subscribe();
 }
 
-// Start Game Loop
+// Start Match Loop
 function startMatch() {
-  lblStatus.textContent = "Game Active - Defend & Jump!";
+  lblStatus.textContent = "Defend the track & jump!";
   gameOverBox.style.display = "none";
 
-  // Reset character physics
   p1.y = GROUND_Y - p1.h; p1.vy = 0; p1.dead = false; p1.score = 0;
   p2.y = GROUND_Y - p2.h; p2.vy = 0; p2.dead = false; p2.score = 0;
 
   bullets = [];
+  particles = [];
   currentBox = null;
   boxIdCounter = 0;
-  boxSpawnDelay = 30;
+  boxSpawnTimer = 0.5;
+  lastFrameTime = performance.now();
 
   if (animationId) cancelAnimationFrame(animationId);
   animationId = requestAnimationFrame(gameLoop);
 }
 
-// Main Frame Loop
-function gameLoop() {
-  updatePhysics();
-  renderCanvas();
+// Main Frame Loop with Delta Time
+function gameLoop(now) {
+  const dt = Math.min((now - lastFrameTime) / 1000, 0.1); // Clamp to avoid huge jumps
+  lastFrameTime = now;
+
+  try {
+    updatePhysics(dt);
+    renderCanvas();
+  } catch (err) {
+    console.error("Frame loop caught error:", err);
+  }
 
   if (!p1.dead || !p2.dead) {
     animationId = requestAnimationFrame(gameLoop);
@@ -328,128 +343,153 @@ function gameLoop() {
   }
 }
 
-// Update Game World
-function updatePhysics() {
-  // Update Player 1 Physics
+// Core Physics & Logic
+function updatePhysics(dt) {
+  // 1. Player 1 Physics
   if (!p1.dead) {
-    p1.vy += GRAVITY;
-    p1.y += p1.vy;
+    p1.vy += GRAVITY * dt;
+    p1.y += p1.vy * dt;
     if (p1.y > GROUND_Y - p1.h) {
       p1.y = GROUND_Y - p1.h;
       p1.vy = 0;
     }
   }
 
-  // Update Player 2 Physics
+  // 2. Player 2 Physics
   if (!p2.dead) {
-    p2.vy += GRAVITY;
-    p2.y += p2.vy;
+    p2.vy += GRAVITY * dt;
+    p2.y += p2.vy * dt;
     if (p2.y > GROUND_Y - p2.h) {
       p2.y = GROUND_Y - p2.h;
       p2.vy = 0;
     }
   }
 
-  // Spawn Box if none exists
+  // 3. Particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const pt = particles[i];
+    pt.x += pt.vx * dt;
+    pt.y += pt.vy * dt;
+    pt.life -= dt;
+    if (pt.life <= 0) particles.splice(i, 1);
+  }
+
+  // 4. Host Spawns Boxes (P1 is host, or P2 if P1 is dead)
+  const isHost = (myRole === "p1") || (p1.dead && myRole === "p2");
   if (!currentBox) {
-    boxSpawnDelay--;
-    if (boxSpawnDelay <= 0) {
+    boxSpawnTimer -= dt;
+    if (boxSpawnTimer <= 0 && isHost) {
       boxIdCounter++;
-      currentBox = {
-        id: boxIdCounter,
+      const newBox = {
+        id: "box_" + boxIdCounter + "_" + Date.now(),
         x: canvas.width,
-        y: GROUND_Y - 32,
-        w: 32,
-        h: 32,
+        y: GROUND_Y - 28,
+        w: 28,
+        h: 28,
         hp: 3,
         maxHp: 3
       };
-      boxSpawnDelay = 40;
+      currentBox = newBox;
+
+      if (realtimeChannel) {
+        realtimeChannel.send({
+          type: "broadcast",
+          event: "spawn_box",
+          payload: newBox
+        });
+      }
     }
   }
 
-  // Update Bullets
+  // 5. Update Bullets and Collision with Box
   for (let i = bullets.length - 1; i >= 0; i--) {
     const b = bullets[i];
-    b.x += b.vx;
+    b.x += b.vx * dt;
 
-    // Check collision with the active box
-    if (currentBox && b.x >= currentBox.x && b.x <= currentBox.x + currentBox.w &&
+    if (currentBox &&
+        b.x >= currentBox.x && b.x <= currentBox.x + currentBox.w &&
         b.y >= currentBox.y && b.y <= currentBox.y + currentBox.h) {
 
-      // Remove bullet
+      const targetBoxId = currentBox.id;
       bullets.splice(i, 1);
 
-      // Only the shooter registers the hit and broadcasts it to prevent duplicate damage
+      // Only the shooter emits the hit event to prevent duplicate damage
       if (b.owner === myRole) {
-        applyBoxDamage(currentBox);
+        applyHit(targetBoxId, myRole);
         if (realtimeChannel) {
           realtimeChannel.send({
             type: "broadcast",
-            event: "damage",
-            payload: { boxId: currentBox.id }
+            event: "box_hit",
+            payload: { boxId: targetBoxId, shooter: myRole }
           });
         }
       }
       continue;
     }
 
-    // Clean up off-screen bullets
     if (b.x > canvas.width) {
       bullets.splice(i, 1);
     }
   }
 
-  // Update Box Position & Player Collision
+  // 6. Update Box Position & Player Collision
   if (currentBox) {
-    currentBox.x -= BOX_SPEED;
+    currentBox.x -= BOX_SPEED * dt;
 
-    // Check collision with Player 2 (front runner at x=95)
-    if (!p2.dead && isBoxCollidingWith(p2, currentBox)) {
+    // Check collision with Player 2 (front)
+    if (!p2.dead && checkPlayerBoxCollision(p2, currentBox)) {
       p2.dead = true;
       if (myRole === "p2") broadcastDeath("p2");
     }
 
-    // Check collision with Player 1 (back runner at x=50)
-    if (!p1.dead && isBoxCollidingWith(p1, currentBox)) {
+    // Check collision with Player 1 (back)
+    if (!p1.dead && checkPlayerBoxCollision(p1, currentBox)) {
       p1.dead = true;
       if (myRole === "p1") broadcastDeath("p1");
     }
 
-    // Remove box if it safely leaves the screen
-    if (currentBox.x + currentBox.w < 0) {
+    // Box left screen safely
+    if (currentBox.x + currentBox.w < -10) {
       currentBox = null;
-      boxSpawnDelay = 45;
+      boxSpawnTimer = 0.6;
     }
   }
 }
 
-// Reduce Box HP & Handle Destruction
-function applyBoxDamage(box) {
-  box.hp--;
-  if (box.hp <= 0) {
-    // Both players get +1 score for destroying the box together
-    if (!p1.dead) p1.score++;
-    if (!p2.dead) p2.score++;
+// Box Damage & Destruction (Guaranteed safe from null-pointer errors)
+function applyHit(boxId, shooter) {
+  if (!currentBox || currentBox.id !== boxId) return;
+
+  currentBox.hp--;
+  spawnParticles(currentBox.x + currentBox.w / 2, currentBox.y + currentBox.h / 2, 4, "#ffeb3b");
+
+  if (currentBox.hp <= 0) {
+    if (shooter === "p1") p1.score++;
+    if (shooter === "p2") p2.score++;
+
+    // Large explosion effect
+    spawnParticles(currentBox.x + currentBox.w / 2, currentBox.y + currentBox.h / 2, 14, "#ff4444");
+
+    // Nullify box and schedule next spawn
     currentBox = null;
-    boxSpawnDelay = 50; // Delay before next box spawns
+    boxSpawnTimer = 0.8;
   }
 }
 
-// AABB Collision Detection (Passes if feet are above box top)
-function isBoxCollidingWith(player, box) {
-  const playerLeft = player.x;
-  const playerRight = player.x + player.w;
-  const playerBottom = player.y + player.h;
+// Bounding Box Collision Check (Jumping clears the box safely)
+function checkPlayerBoxCollision(player, box) {
+  const pRight = player.x + player.w;
+  const pLeft = player.x;
+  const pBottom = player.y + player.h;
 
-  const boxLeft = box.x;
-  const boxRight = box.x + box.w;
-  const boxTop = box.y;
+  const bRight = box.x + box.w;
+  const bLeft = box.x;
+  const bTop = box.y;
 
-  const horizontallyOverlap = playerRight > boxLeft && playerLeft < boxRight;
-  const hitGroundLevel = playerBottom > boxTop + 4; // Tolerance for jump clearance
+  const horizontalOverlap = pRight > bLeft + 2 && pLeft < bRight - 2;
+  const verticalHit = pBottom > bTop + 4; // Clear if feet are above box top
 
-  return horizontallyOverlap && hitGroundLevel;
+  return horizontalOverlap && verticalHit;
 }
 
 function broadcastDeath(role) {
@@ -462,11 +502,25 @@ function broadcastDeath(role) {
   }
 }
 
-// Render Shared Track
+function spawnParticles(x, y, count, color) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 40 + Math.random() * 120;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      color,
+      life: 0.35
+    });
+  }
+}
+
+// Canvas Rendering
 function renderCanvas() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // Single Shared Ground Track
+  // Ground Track
   ctx.strokeStyle = "#444";
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -474,69 +528,62 @@ function renderCanvas() {
   ctx.lineTo(canvas.width, GROUND_Y);
   ctx.stroke();
 
-  // Draw Approaching Box (Red) with Health Bar & Counter
+  // Draw Particles
+  particles.forEach((pt) => {
+    ctx.fillStyle = pt.color;
+    ctx.fillRect(pt.x, pt.y, 3, 3);
+  });
+
+  // Draw Approaching Box (Red)
   if (currentBox) {
     ctx.fillStyle = "#d32f2f";
     ctx.fillRect(currentBox.x, currentBox.y, currentBox.w, currentBox.h);
 
-    // Box Outline
     ctx.strokeStyle = "#fff";
     ctx.lineWidth = 1;
     ctx.strokeRect(currentBox.x, currentBox.y, currentBox.w, currentBox.h);
 
-    // Box Hit / HP Label inside the box
+    // HP Label: 3/3, 2/3, 1/3
     ctx.fillStyle = "#fff";
-    ctx.font = "bold 12px monospace";
+    ctx.font = "bold 11px monospace";
     ctx.textAlign = "center";
-    ctx.fillText(`${currentBox.hp}/${currentBox.maxHp}`, currentBox.x + currentBox.w / 2, currentBox.y + 20);
+    ctx.fillText(`${currentBox.hp}/${currentBox.maxHp}`, currentBox.x + currentBox.w / 2, currentBox.y + 18);
 
-    // Mini Health Bar above box
-    const barWidth = currentBox.w;
-    const hpPercent = currentBox.hp / currentBox.maxHp;
-    ctx.fillStyle = "#333";
-    ctx.fillRect(currentBox.x, currentBox.y - 8, barWidth, 4);
-    ctx.fillStyle = hpPercent > 0.35 ? "#4caf50" : "#ff9800";
-    ctx.fillRect(currentBox.x, currentBox.y - 8, barWidth * hpPercent, 4);
+    // Health Bar
+    const hpRatio = Math.max(0, currentBox.hp / currentBox.maxHp);
+    ctx.fillStyle = "#222";
+    ctx.fillRect(currentBox.x, currentBox.y - 7, currentBox.w, 4);
+    ctx.fillStyle = hpRatio > 0.35 ? "#4caf50" : "#ff9800";
+    ctx.fillRect(currentBox.x, currentBox.y - 7, currentBox.w * hpRatio, 4);
   }
 
-  // Draw Flying Bullets (Yellow)
+  // Draw Bullets
   ctx.fillStyle = "#ffeb3b";
-  bullets.forEach(b => {
-    ctx.fillRect(b.x, b.y - 2, 7, 3);
+  bullets.forEach((b) => {
+    ctx.fillRect(b.x, b.y - 2, 8, 3);
   });
 
-  // Draw Player 1 (Blue)
+  // Draw Characters
   drawPlayer(p1, "#00aaff", "P1");
-
-  // Draw Player 2 (Orange)
   drawPlayer(p2, "#ff8800", "P2");
 
-  // Score HUD
+  // HUD
   ctx.textAlign = "left";
   ctx.font = "12px monospace";
   ctx.fillStyle = "#fff";
-  ctx.fillText(`P1 Boxes Destroyed: ${p1.score}${p1.dead ? " (DEAD)" : ""}`, 10, 20);
-  ctx.fillText(`P2 Boxes Destroyed: ${p2.score}${p2.dead ? " (DEAD)" : ""}`, 10, 38);
+  ctx.fillText(`P1 Boxes Destroyed: ${p1.score}${p1.dead ? " (OUT)" : ""}`, 10, 20);
+  ctx.fillText(`P2 Boxes Destroyed: ${p2.score}${p2.dead ? " (OUT)" : ""}`, 10, 38);
 }
 
-// Draw Character with Gun Barrel
 function drawPlayer(player, color, tag) {
-  if (player.dead) {
-    ctx.fillStyle = "#555";
-  } else {
-    ctx.fillStyle = color;
-  }
-
-  // Body
+  ctx.fillStyle = player.dead ? "#555" : color;
   ctx.fillRect(player.x, player.y, player.w, player.h);
 
-  // Gun Barrel protruding forward
   if (!player.dead) {
     ctx.fillStyle = "#aaa";
     ctx.fillRect(player.x + player.w, player.y + player.h / 2 - 2, 6, 4);
   }
 
-  // Tag above character
   ctx.fillStyle = "#fff";
   ctx.font = "10px monospace";
   ctx.textAlign = "center";
@@ -545,7 +592,7 @@ function drawPlayer(player, color, tag) {
 
 function checkMatchOver() {
   if (p1.dead && p2.dead) {
-    lblStatus.textContent = "Match Over - Both Eliminated!";
+    lblStatus.textContent = "Match Over!";
     gameOverBox.style.display = "block";
     lblScores.textContent = `Boxes Destroyed: P1: ${p1.score} | P2: ${p2.score}`;
   }
@@ -559,7 +606,6 @@ function drawLobbyPlaceholder() {
   ctx.fillText("Waiting for Player 2 to join...", canvas.width / 2, canvas.height / 2);
 }
 
-// Rematch Handling
 function triggerRematch() {
   if (realtimeChannel) {
     realtimeChannel.send({
