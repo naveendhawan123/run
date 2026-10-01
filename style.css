@@ -101,7 +101,6 @@ canvas {
   aspect-ratio: 600 / 240;
 }
 
-/* On-screen control buttons */
 .controls-bar {
   display: flex;
   gap: 10px;
