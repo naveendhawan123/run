@@ -10,7 +10,7 @@ if (window.supabase && SUPABASE_URL && SUPABASE_URL.startsWith("https://")) {
   supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 }
 
-// 2. PLAYER IDENTITY (Uses sessionStorage so two tabs on the same machine get distinct IDs)
+// 2. PLAYER IDENTITY (Uses sessionStorage for separate tabs on same device)
 let playerId = sessionStorage.getItem("coop_runner_pid");
 if (!playerId) {
   playerId = "p_" + Math.random().toString(36).substring(2, 9);
@@ -51,12 +51,43 @@ let lastFrameTime = performance.now();
 
 // Physics & Tuning Constants
 const GROUND_Y = 190;
-const GRAVITY = 600;       // px/sec^2
-const JUMP_FORCE = -470;   // px/sec
+const GRAVITY = 680;       // px/sec^2 (tuned for floatier, longer jump)
+const JUMP_FORCE = -475;   // px/sec (higher jump clearance)
 const BULLET_SPEED = 780;  // px/sec
 const BOX_SPEED = 140;     // px/sec (~3.5 seconds across screen)
 const SHOOT_COOLDOWN = 320;// ms (~10 shooting chances per box)
 let lastShootTime = 0;
+
+// The Spiral - Creature 08 Sprite
+const CREATURE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <defs>
+    <clipPath id="c8"><circle cx="100" cy="78" r="36"/></clipPath>
+    <path id="sp" fill="none" stroke-width="2" d="M100 100a1.5 1.5 0 0 1 0 3a3 3 0 0 1 0-6a4.5 4.5 0 0 1 0 9a6 6 0 0 1 0-12a7.5 7.5 0 0 1 0 15a9 9 0 0 1 0-18a10.5 10.5 0 0 1 0 21a12 12 0 0 1 0-24a13.5 13.5 0 0 1 0 27a15 15 0 0 1 0-30a16.5 16.5 0 0 1 0 33a18 18 0 0 1 0-36a19.5 19.5 0 0 1 0 39a21 21 0 0 1 0-42a22.5 22.5 0 0 1 0 45a24 24 0 0 1 0-48a25.5 25.5 0 0 1 0 51a27 27 0 0 1 0-54a28.5 28.5 0 0 1 0 57a30 30 0 0 1 0-60a31.5 31.5 0 0 1 0 63a33 33 0 0 1 0-66a34.5 34.5 0 0 1 0 69a36 36 0 0 1 0-72"/>
+    <g id="ha" fill="none" stroke="#d9b0ff" stroke-width="2.5" stroke-linecap="round">
+      <path d="M0 0L-4-16M0 0L-9-13M0 0L-13-8M0 0L-14-1M0 0L-11 6M0 0L2-17"/>
+    </g>
+  </defs>
+  <circle cx="100" cy="78" r="42" fill="none" stroke="#c04bff" stroke-width="2" opacity="0.6"/>
+  <g transform="translate(58 130) rotate(-20)"><use href="#ha"/></g>
+  <g transform="translate(142 130) scale(-1 1) rotate(-20)"><use href="#ha"/></g>
+  <path d="M100 30C60 30 46 70 48 110C50 150 34 168 28 190L60 180L80 192L100 182L120 192L140 180L172 190C166 168 150 150 152 110C154 70 140 30 100 30Z" fill="#150824" stroke="#ff3fa8" stroke-width="3.5" stroke-opacity="0.9"/>
+  <circle cx="100" cy="78" r="36" fill="#f0e2ff"/>
+  <g clip-path="url(#c8)">
+    <g transform="translate(0 -22)">
+      <use href="#sp" stroke="#3a0060"/>
+      <use href="#sp" stroke="#ff3fa8" opacity="0.75"/>
+    </g>
+  </g>
+  <g>
+    <path d="M56 124Q100 184 144 124Q100 146 56 124Z" fill="#06020a"/>
+    <path d="M60 128Q100 172 140 128" stroke="#f3eaff" stroke-width="4.5" fill="none" stroke-dasharray="1.6 2.4"/>
+    <path d="M66 132Q100 150 134 132" stroke="#f3eaff" stroke-width="3.4" fill="none" stroke-dasharray="1.6 2.4"/>
+    <path d="M84 148q16 14 32 0q-16 8-32 0z" fill="#ff3fa8"/>
+  </g>
+</svg>`;
+
+const creatureImg = new Image();
+creatureImg.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(CREATURE_SVG);
 
 // Characters on Shared Track
 const p1 = { x: 55, y: GROUND_Y - 24, vy: 0, w: 24, h: 24, dead: false, score: 0 };
@@ -65,8 +96,8 @@ const p2 = { x: 105, y: GROUND_Y - 24, vy: 0, w: 24, h: 24, dead: false, score: 
 let bullets = [];
 let currentBox = null;
 let boxIdCounter = 0;
-let boxSpawnTimer = 0.5;   // Seconds before next box spawns
-let particles = [];        // Destruction and hit effects
+let boxSpawnTimer = 0.5;   // Seconds before next spawn
+let particles = [];        // Hit & destruction effects
 
 // Check for Invite Link on Load
 window.addEventListener("DOMContentLoaded", () => {
@@ -119,7 +150,6 @@ function performJump() {
   const me = myRole === "p1" ? p1 : p2;
   if (me.dead) return;
 
-  // Jump allowed only when grounded
   if (me.y >= GROUND_Y - me.h - 1) {
     me.vy = JUMP_FORCE;
     if (realtimeChannel) {
@@ -258,7 +288,7 @@ function enterGameView(room) {
   }
 }
 
-// Realtime Network Handler (self: false avoids duplicate broadcast processing)
+// Realtime Network Handler
 function subscribeNetwork(code) {
   if (realtimeChannel) {
     supabaseClient.removeChannel(realtimeChannel);
@@ -323,9 +353,9 @@ function startMatch() {
   animationId = requestAnimationFrame(gameLoop);
 }
 
-// Main Frame Loop with Delta Time
+// Main Frame Loop
 function gameLoop(now) {
-  const dt = Math.min((now - lastFrameTime) / 1000, 0.1); // Clamp to avoid huge jumps
+  const dt = Math.min((now - lastFrameTime) / 1000, 0.1);
   lastFrameTime = now;
 
   try {
@@ -343,7 +373,7 @@ function gameLoop(now) {
   }
 }
 
-// Core Physics & Logic
+// Physics & Collision Logic
 function updatePhysics(dt) {
   // 1. Player 1 Physics
   if (!p1.dead) {
@@ -374,13 +404,13 @@ function updatePhysics(dt) {
     if (pt.life <= 0) particles.splice(i, 1);
   }
 
-  // 4. Host Spawns Boxes (P1 is host, or P2 if P1 is dead)
+  // 4. Host Spawns Creature (P1 is host, or P2 if P1 is dead)
   const isHost = (myRole === "p1") || (p1.dead && myRole === "p2");
   if (!currentBox) {
     boxSpawnTimer -= dt;
     if (boxSpawnTimer <= 0 && isHost) {
       boxIdCounter++;
-      const newBox = {
+      const newCreature = {
         id: "box_" + boxIdCounter + "_" + Date.now(),
         x: canvas.width,
         y: GROUND_Y - 28,
@@ -389,19 +419,19 @@ function updatePhysics(dt) {
         hp: 3,
         maxHp: 3
       };
-      currentBox = newBox;
+      currentBox = newCreature;
 
       if (realtimeChannel) {
         realtimeChannel.send({
           type: "broadcast",
           event: "spawn_box",
-          payload: newBox
+          payload: newCreature
         });
       }
     }
   }
 
-  // 5. Update Bullets and Collision with Box
+  // 5. Update Bullets and Collision with Creature
   for (let i = bullets.length - 1; i >= 0; i--) {
     const b = bullets[i];
     b.x += b.vx * dt;
@@ -413,7 +443,6 @@ function updatePhysics(dt) {
       const targetBoxId = currentBox.id;
       bullets.splice(i, 1);
 
-      // Only the shooter emits the hit event to prevent duplicate damage
       if (b.owner === myRole) {
         applyHit(targetBoxId, myRole);
         if (realtimeChannel) {
@@ -432,23 +461,20 @@ function updatePhysics(dt) {
     }
   }
 
-  // 6. Update Box Position & Player Collision
+  // 6. Update Creature Movement & Player Collision
   if (currentBox) {
     currentBox.x -= BOX_SPEED * dt;
 
-    // Check collision with Player 2 (front)
     if (!p2.dead && checkPlayerBoxCollision(p2, currentBox)) {
       p2.dead = true;
       if (myRole === "p2") broadcastDeath("p2");
     }
 
-    // Check collision with Player 1 (back)
     if (!p1.dead && checkPlayerBoxCollision(p1, currentBox)) {
       p1.dead = true;
       if (myRole === "p1") broadcastDeath("p1");
     }
 
-    // Box left screen safely
     if (currentBox.x + currentBox.w < -10) {
       currentBox = null;
       boxSpawnTimer = 0.6;
@@ -456,27 +482,27 @@ function updatePhysics(dt) {
   }
 }
 
-// Box Damage & Destruction (Guaranteed safe from null-pointer errors)
+// Creature Hit & Destruction Handling
 function applyHit(boxId, shooter) {
   if (!currentBox || currentBox.id !== boxId) return;
 
   currentBox.hp--;
-  spawnParticles(currentBox.x + currentBox.w / 2, currentBox.y + currentBox.h / 2, 4, "#ffeb3b");
+  // Hit particles (neon pink glow)
+  spawnParticles(currentBox.x + currentBox.w / 2, currentBox.y + currentBox.h / 2, 5, "#ff3fa8");
 
   if (currentBox.hp <= 0) {
     if (shooter === "p1") p1.score++;
     if (shooter === "p2") p2.score++;
 
-    // Large explosion effect
-    spawnParticles(currentBox.x + currentBox.w / 2, currentBox.y + currentBox.h / 2, 14, "#ff4444");
+    // Large explosion effect (neon purple burst)
+    spawnParticles(currentBox.x + currentBox.w / 2, currentBox.y + currentBox.h / 2, 16, "#c04bff");
 
-    // Nullify box and schedule next spawn
     currentBox = null;
     boxSpawnTimer = 0.8;
   }
 }
 
-// Bounding Box Collision Check (Jumping clears the box safely)
+// Collision Check
 function checkPlayerBoxCollision(player, box) {
   const pRight = player.x + player.w;
   const pLeft = player.x;
@@ -487,7 +513,7 @@ function checkPlayerBoxCollision(player, box) {
   const bTop = box.y;
 
   const horizontalOverlap = pRight > bLeft + 2 && pLeft < bRight - 2;
-  const verticalHit = pBottom > bTop + 4; // Clear if feet are above box top
+  const verticalHit = pBottom > bTop + 4;
 
   return horizontalOverlap && verticalHit;
 }
@@ -534,27 +560,27 @@ function renderCanvas() {
     ctx.fillRect(pt.x, pt.y, 3, 3);
   });
 
-  // Draw Approaching Box (Red)
+  // Draw Approaching Creature with Health Indicator
   if (currentBox) {
-    ctx.fillStyle = "#d32f2f";
-    ctx.fillRect(currentBox.x, currentBox.y, currentBox.w, currentBox.h);
+    if (creatureImg.complete) {
+      ctx.drawImage(creatureImg, currentBox.x, currentBox.y, currentBox.w, currentBox.h);
+    } else {
+      ctx.fillStyle = "#c04bff";
+      ctx.fillRect(currentBox.x, currentBox.y, currentBox.w, currentBox.h);
+    }
 
-    ctx.strokeStyle = "#fff";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(currentBox.x, currentBox.y, currentBox.w, currentBox.h);
-
-    // HP Label: 3/3, 2/3, 1/3
-    ctx.fillStyle = "#fff";
-    ctx.font = "bold 11px monospace";
-    ctx.textAlign = "center";
-    ctx.fillText(`${currentBox.hp}/${currentBox.maxHp}`, currentBox.x + currentBox.w / 2, currentBox.y + 18);
-
-    // Health Bar
+    // Mini Health Bar above creature's head
     const hpRatio = Math.max(0, currentBox.hp / currentBox.maxHp);
     ctx.fillStyle = "#222";
     ctx.fillRect(currentBox.x, currentBox.y - 7, currentBox.w, 4);
-    ctx.fillStyle = hpRatio > 0.35 ? "#4caf50" : "#ff9800";
+    ctx.fillStyle = hpRatio > 0.35 ? "#4caf50" : "#ff3fa8";
     ctx.fillRect(currentBox.x, currentBox.y - 7, currentBox.w * hpRatio, 4);
+
+    // Hit Count Indicator (3/3, 2/3, 1/3)
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 10px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(`${currentBox.hp}/${currentBox.maxHp}`, currentBox.x + currentBox.w / 2, currentBox.y - 11);
   }
 
   // Draw Bullets
@@ -571,8 +597,8 @@ function renderCanvas() {
   ctx.textAlign = "left";
   ctx.font = "12px monospace";
   ctx.fillStyle = "#fff";
-  ctx.fillText(`P1 Boxes Destroyed: ${p1.score}${p1.dead ? " (OUT)" : ""}`, 10, 20);
-  ctx.fillText(`P2 Boxes Destroyed: ${p2.score}${p2.dead ? " (OUT)" : ""}`, 10, 38);
+  ctx.fillText(`P1 Creatures Destroyed: ${p1.score}${p1.dead ? " (OUT)" : ""}`, 10, 20);
+  ctx.fillText(`P2 Creatures Destroyed: ${p2.score}${p2.dead ? " (OUT)" : ""}`, 10, 38);
 }
 
 function drawPlayer(player, color, tag) {
@@ -594,7 +620,7 @@ function checkMatchOver() {
   if (p1.dead && p2.dead) {
     lblStatus.textContent = "Match Over!";
     gameOverBox.style.display = "block";
-    lblScores.textContent = `Boxes Destroyed: P1: ${p1.score} | P2: ${p2.score}`;
+    lblScores.textContent = `Creatures Destroyed: P1: ${p1.score} | P2: ${p2.score}`;
   }
 }
 
